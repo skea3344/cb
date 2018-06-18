@@ -11,6 +11,7 @@ static int root(QuickUnion qu, int i){
   return i;
 }
 
+
 int qu_union(QuickUnion qu, int p, int q){
   int proot, qroot;
   proot = root(qu,p);
