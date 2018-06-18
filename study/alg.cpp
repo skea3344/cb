@@ -19,6 +19,8 @@ int qu_union(QuickUnion qu, int p, int q){
   return 0;
 }
 
+
+
 int qu_connected(QuickUnion qu, int p, int q){
   return root(qu,p) == root(qu,q);
 }
