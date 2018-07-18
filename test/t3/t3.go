@@ -97,13 +97,17 @@ func main() {
 	fmt.Println(c.Do("EXEC"))
 	c.Do("SET", "k3", 0)
 	d := make(chan int, 1)
-	go func() {
-		addThousand(c1, "k3")
-		d <- 1
-	}()
-	addThousand(c, "k3")
+	fmt.Println(redis.Int(c.Do("GET", "k3")))
+	fmt.Println("----------------------我是一条分割线")
+	// go func() {
+	// 	addThousand(c1, "k3")
+	// 	d <- 1
+	// }()
+	// addThousand(c, "k3")
+	// <-d
 	fmt.Println(redis.Int(c.Do("GET", "k3")))
 
+	fmt.Println("----------------------我是一条分割线")
 	c.Do("DEL", "k4")
 	fmt.Println(c.Do("SET", "k4", 100))
 	fmt.Println(c.Do("SETNX", "k4", 200))
@@ -113,8 +117,7 @@ func main() {
 	// 	return
 	// }
 	// fmt.Println(lock)
-	<-d
-
+	fmt.Println("----------------------我是一条分割线")
 	c.Do("SET", "k3", 0)
 	go func() {
 		addThousandWatch(c1, "k3")
@@ -123,22 +126,64 @@ func main() {
 	addThousandWatch(c, "k3")
 	<-d
 	fmt.Println(redis.Int(c.Do("GET", "k3")))
-
+	c.Do("EXPIRE", "k3", 10)
+	fmt.Println(redis.Int(c.Do("TTL", "k3")))
+	c.Do("DEL", "k3")
+	fmt.Println("----------------------我是一条分割线")
+	go func() {
+		acquireLock(c1, "k3", 5, 5)
+		d <- 1
+	}()
+	time.Sleep(1 * time.Second)
+	lock, err := acquireLock(c, "k3", 10, 5)
+	if err != nil {
+		panic(err)
+	}
+	releaseLock(c, "k3", lock)
+	<-d
+	fmt.Println("----------------------我是一条分割线------------")
+	key := "k5"
+	c.Do("DEL", key)
+	go func() {
+		l1, err := acquireLock(c1, key, 12, 10)
+		if err != nil {
+			panic(err)
+		}
+		time.Sleep(20 * time.Second)
+		c1.Do("SET", key, "inside")
+		err = releaseLock(c1, key, l1)
+		if err != nil {
+			panic(err)
+		}
+		d <- 1
+	}()
+	time.Sleep(1 * time.Second)
+	l2, err := acquireLock(c, key, 12, 10)
+	if err != nil {
+		panic(err)
+	}
+	c.Do("SET", key, "outside")
+	releaseLock(c, key, l2)
+	<-d
 }
 
 func addThousand(c redis.Conn, key string) {
 	for i := 0; i < 1000; i++ {
-		value, err := redis.Int(c.Do("GET", key))
+		lock, err := acquireLock(c, key, 10, 10)
+		fmt.Println(&c, lock)
 		if err != nil {
-			if err.Error() == redis.ErrNil.Error() {
-				c.Do("SET", key, 1)
-				// fmt.Println(&c, "设置值", 1)
-				continue
-			}
 			panic(err)
 		}
+		value, err := redis.Int(c.Do("GET", key))
+		if err != nil {
+			panic(err)
+		}
+
 		c.Do("SET", key, value+1)
-		//
+		err = releaseLock(c, key, lock)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -173,21 +218,59 @@ func addThousandWatch(c redis.Conn, key string) (err error) {
 	return
 }
 
-// getLock 获取某个key的锁
-func getLock(c redis.Conn, key string, timeout int) (string, error) {
+// acquireLock 获取某个key的锁
+func acquireLock(c redis.Conn, key string, timeout int, lockTimeout int) (string, error) {
+	lockKey := "lock:" + key
 	lock := uuid.Must(uuid.NewV4()).String()
 	endtime := time.Now().Add(time.Duration(timeout) * time.Second)
 	for time.Now().Before(endtime) {
-		ret, err := redis.Int(c.Do("SETNX", "lock:"+key, lock))
+		ret, err := redis.Int(c.Do("SETNX", lockKey, lock))
 		if err != nil {
 			return "", err
 		}
 		if ret == 1 {
+			fmt.Println("成功获取锁")
+			c.Do("EXPIRE", lockKey, lockTimeout)
 			return lock, nil
 		}
-		time.Sleep(5 * time.Millisecond)
+		lifetime, err := redis.Int(c.Do("TTL", lockKey))
+		if err != nil {
+			return "", err
+		}
+		if lifetime == -1 {
+			fmt.Println("该锁没有超时时间,给其设置超时")
+			c.Do("EXPIRE", lockKey, lockTimeout)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	return "", ErrTimeout
+}
+
+// releaseLock 释放某个key的锁
+func releaseLock(c redis.Conn, key string, lock string) (err error) {
+	lockKey := "lock:" + key
+	defer func() {
+		if err != nil {
+			c.Do("DISCARD")
+		}
+	}()
+	for {
+		c.Do("WATCH", lockKey)
+		var lockString string
+		lockString, err = redis.String(c.Do("GET", lockKey))
+		if err != nil {
+			return err
+		}
+		if lockString == lock {
+			c.Send("MULTI")
+			c.Send("DEL", lockKey)
+			c.Do("EXEC")
+			return
+		}
+		c.Do("UNWATCH", lockKey)
+		fmt.Println("解锁失败 等待再次解锁")
+		time.Sleep(1 * time.Second)
+	}
 }
 
 // zpop 从一个有序集合里面取出排名最前的对象
