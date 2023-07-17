@@ -61,7 +61,6 @@ func main() {
 	fmt.Println(a + 2)
 	a++
 	fmt.Println(a)
-
 	testUint32 := uint32(0)
 	var wg sync.WaitGroup
 	wg.Add(10)
